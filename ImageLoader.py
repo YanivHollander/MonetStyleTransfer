@@ -6,7 +6,7 @@ from typing import List, Any
 import tensorflow as tf
 import numpy as np
 
-DATA_PATH = "/Users/hollander/OneDrive/Documents/Career/ProjectNextGen/Kaggle/MonetStyleTransfer/Data/"
+DATA_PATH = ""
 IMAGE_SIZE = [256, 256]
 BATCH_SIZE = 64
 
