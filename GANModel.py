@@ -4,24 +4,31 @@ from tensorflow import keras as keras
 from tensorflow import Tensor
 from typing import List, Callable
 import unittest
-from tensorflow.python.ops import math_ops
 import numpy as np
+import tensorflow_addons as tfa
 
 STRIDES = 2
 KERNEL_SIZE = 4
 
 ### Models
-def endcodingLayer(filters: int, size: int, strides: int, layerInd = -1, dropout = False) -> keras.Sequential:
-    name = 'encode'
-    if layerInd != -1:
-        name += '_' + str(layerInd)
-    ret = keras.Sequential(name=name)
+class SmallGAN(keras.Model):
+    def train_step(self, data):
+        return {'loss': 0}
+
+    def __call__(self, *args, **kwargs):
+        photos = args[0]
+        photo = next(photos.as_numpy_iterator())
+        return photo
+
+## Model parts
+def endcodingLayer(filters: int, size: int, strides: int, intanceNorm = True) -> keras.Sequential:
+    ret = keras.Sequential()
     initializer = tf.random_normal_initializer(0., 0.02)
     ret.add(layers.Conv2D(filters=filters, kernel_size=size, strides=strides, padding='same',
-                          kernel_initializer=initializer))
-    ret.add(layers.BatchNormalization())
-    if dropout:
-        ret.add(layers.Dropout(0.5))
+                          kernel_initializer=initializer, use_bias=False))
+    if intanceNorm:
+        gamma_init = keras.initializers.RandomNormal(mean=0.0, stddev=0.02)
+        ret.add(tfa.layers.InstanceNormalization(gamma_initializer=gamma_init))
     ret.add(layers.LeakyReLU())
     return ret
 
@@ -29,47 +36,65 @@ def decodingLayer(filters: int, size: int, strides: int, dropout = False) -> ker
     ret = keras.Sequential()
     initializer = tf.random_normal_initializer(0., 0.02)
     ret.add(layers.Conv2DTranspose(filters=filters, kernel_size=size, strides=strides, padding='same',
-                                   kernel_initializer=initializer))
-    ret.add(layers.BatchNormalization())
+                                   kernel_initializer=initializer, use_bias=False))
+    gamma_init = keras.initializers.RandomNormal(mean=0.0, stddev=0.02)
+    ret.add(tfa.layers.InstanceNormalization(gamma_initializer=gamma_init))
     if dropout:
         ret.add(layers.Dropout(0.5))
-    ret.add(layers.LeakyReLU())
+    ret.add(layers.ReLU())
     return ret
 
 def Generator(shape: List[int], training = False) -> keras.Model:
+    print("training = ", training)
+
     inputs=layers.Input(shape=shape)
     x = inputs
 
     # Encoding stack of layers
     endcodingStack = []
-    endcodingStack.append(endcodingLayer(64 , KERNEL_SIZE, STRIDES, layerInd=0, dropout = training))
-    endcodingStack.append(endcodingLayer(128, KERNEL_SIZE, STRIDES, layerInd=1, dropout = training))
-    endcodingStack.append(endcodingLayer(256, KERNEL_SIZE, STRIDES, layerInd=2, dropout = training))
+    endcodingStack.append(endcodingLayer(64 , KERNEL_SIZE, STRIDES, intanceNorm=False))
+    endcodingStack.append(endcodingLayer(128, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(256, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(512, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(512, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(512, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(512, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(512, KERNEL_SIZE, STRIDES))
+    skipConnections = []
     for layer in endcodingStack:
         x = layer(x)
+        skipConnections.append(x)
+    skipConnections.pop()
 
     # Decoding stack of layers
     decodingStack = []
-    decodingStack.append(decodingLayer(256, KERNEL_SIZE, STRIDES, dropout = training))
-    decodingStack.append(decodingLayer(128 , KERNEL_SIZE, STRIDES, dropout = training))
+    decodingStack.append(decodingLayer(512, KERNEL_SIZE, STRIDES, dropout = training))
+    decodingStack.append(decodingLayer(512, KERNEL_SIZE, STRIDES, dropout = training))
+    decodingStack.append(decodingLayer(512, KERNEL_SIZE, STRIDES, dropout = training))
+    decodingStack.append(decodingLayer(512, KERNEL_SIZE, STRIDES))
+    decodingStack.append(decodingLayer(256, KERNEL_SIZE, STRIDES))
+    decodingStack.append(decodingLayer(128 , KERNEL_SIZE, STRIDES))
+    decodingStack.append(decodingLayer(64 , KERNEL_SIZE, STRIDES))
     for layer in decodingStack:
         x = layer(x)
+        x = layers.Concatenate()([x, skipConnections.pop()])
 
     # Output layer - tanh activation to guarantee pixel range of [-1, 1]
     initializer = tf.random_normal_initializer(0., 0.02)
     x = layers.Conv2DTranspose(filters=shape[2], kernel_size=KERNEL_SIZE, strides=STRIDES, padding='same',
                                kernel_initializer=initializer, activation='tanh')(x)
-    # FIXME: Add skip connections
     return keras.Model(inputs=inputs, outputs=x, name="generator")
 
-def Discriminator(shape: List[int], training = False) -> keras.Model:
+def Discriminator(shape: List[int]) -> keras.Model:
     inputs = layers.Input(shape=shape)
 
     # Encoding stack of layers
     endcodingStack = []
-    endcodingStack.append(endcodingLayer(64 , KERNEL_SIZE, STRIDES, layerInd=0, dropout = training))
-    endcodingStack.append(endcodingLayer(128, KERNEL_SIZE, STRIDES, layerInd=1, dropout = training))
-    endcodingStack.append(endcodingLayer(256, KERNEL_SIZE, STRIDES, layerInd=2, dropout = training))
+    endcodingStack.append(endcodingLayer(64 , KERNEL_SIZE, STRIDES, intanceNorm = False))
+    endcodingStack.append(endcodingLayer(128, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(256, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(256, KERNEL_SIZE, STRIDES))
+    endcodingStack.append(endcodingLayer(1, KERNEL_SIZE, STRIDES))
 
     # A input
     x = inputs
@@ -77,38 +102,29 @@ def Discriminator(shape: List[int], training = False) -> keras.Model:
         x = layer(x)
     x = layers.Flatten(name='flatten')(x)
     x = layers.Dense(16, name='dense')(x) # Last layer outputs logits    # FIXME: Determine optimal size of vector
+    x = tfa.layers.InstanceNormalization(center=False, scale=False)(x)
 
-    return keras.Model(inputs=inputs, outputs=x, name='siamese_discriminator')
+    return keras.Model(inputs=inputs, outputs=x, name='discriminator')
 
 ### Losses that go along with SiameseGAN model
-def euclideanDistanceFromOrigin(x):
-    """
-    Calculates Euclidean distances from origin for a batch for vectors
-    :param x: A bach of vectors: (batch, size)
-    :return:
-    """
-    x = tf.convert_to_tensor(x)
-    return tf.norm(x, axis=1)
-
-def euclideanDistanceImageProximalLoss(x):
+def euclideanImageProximalLoss() -> Callable[[Tensor], Tensor]:
     """
     Calculates the average proximal (from origin) Euclidean loss along batch of vectors
     :param x: A bach of vectors: (batch, size)
     :return:
     """
-    return tf.nn.compute_average_loss(euclideanDistanceFromOrigin(x))
+    return lambda x: tf.norm(x, axis=1)
 
-def euclideanDistanceImageDistalLoss(x, margin):
+def euclideanImageDistalLoss(margin) -> Callable[[Tensor], Tensor]:
     """
     Calculates the average distal (around a margin) Euclidean loss along batch of vectors
     :param x:       A bach of vectors: (batch, size)
     :param margin:  Radial margin
     :return:
     """
-    return tf.nn.compute_average_loss(tf.maximum(0., margin - euclideanDistanceFromOrigin(x)))
+    return lambda x: tf.math.maximum(0., margin - tf.norm(x, axis=1))
 
-cosine_loss = tf.keras.losses.CosineSimilarity(reduction=tf.keras.losses.Reduction.NONE)
-def cosineSimilarityImagePairLoss(X, Y):
+def cosineSimilarityImagePairLoss() -> Callable[[Tensor, Tensor, Tensor, Tensor], Tensor]:
     """
     Calculates cosine similarity between pairs of original and generated images, after run by discriminator
     :param x1:  1st original image, forward modeled by discriminator
@@ -117,60 +133,63 @@ def cosineSimilarityImagePairLoss(X, Y):
     :param y2:  2nd image generated from original, forward modeled by discriminator
     :return: COSINE SIMILARITY LOSS
     """
-    X = tf.convert_to_tensor(X)
-    Y = tf.convert_to_tensor(Y)
-    loss = 0
-    for x, y in zip(X, Y):
-        loss += cosine_loss(X - x, Y - y)
-    return loss  # FIXME: Normalize by global batch size from strategy
-
-    # batchSize = x.shape[0]
-    # loss = 0
-    # for i in range(batchSize):
-    #     # print(x[i], y[i])
-    #     for j in range(i, batchSize):
-    #         loss += cosine_loss(x[i] - x[j], y[i] - y[j])
-    # return loss     # FIXME: Normalize by global batch size from strategy
+    return lambda x1, x2, y1, y2: \
+        tf.keras.losses.CosineSimilarity(reduction=tf.keras.losses.Reduction.NONE)(x1-x2, y1-y2)
 
 ### Siamese GAN model
 class SiameseGAN(keras.Model):
-    def __init__(self, shape: List[int], margin: float, euclDistProxLoss, euclDistDistLoss, cosSimPairLoss,
-                 training = False):
+    def __init__(self,
+                 genStyle: keras.Model,
+                 discStyle: keras.Model,
+                 euclProxLoss: Callable[[Tensor], Tensor],
+                 euclDistLoss: Callable[[Tensor], Tensor],
+                 cosSimPairLoss: Callable[[Tensor, Tensor, Tensor, Tensor], Tensor],
+                 genStyleOptim: tf.keras.optimizers.Adam,
+                 discStyleOptim: tf.keras.optimizers.Adam):
         super(SiameseGAN, self).__init__()
-        self.gen = Generator(shape, training = training)
-        self.disc = Discriminator(shape, training = training)
-        self.margin = margin
-        self.euclDistProxLoss = euclDistProxLoss
-        self.euclDistDistLoss = euclDistDistLoss
+
+        # Model parts
+        self.genStyle = genStyle
+        self.discStyle = discStyle
+
+        # Losses
+        self.euclProxLoss = euclProxLoss
+        self.euclDistLoss = euclDistLoss
         self.cosSimPairLoss = cosSimPairLoss
 
+        # Optimizers
+        self.genStyleOptim = genStyleOptim
+        self.discStyleOptim = discStyleOptim
+
     def train_step(self, data):
-        orig, style = data
+        photos, photos_s, styles = data
 
         with tf.GradientTape(persistent=True) as tape:
-            generated = self.gen(orig, training = True)             # Generating from original images
-            discOrig  = self.disc(orig , training = True)           # Discriminating original
-            discStyle = self.disc(style, training = True)           # Discriminating style
-            discGenerated = self.disc(generated, training=True)    # Discriminating generated images
+            fakeStyle = self.genStyle(photos, training=True)        # Photos -> fake styles
+            fakeStyle_s = self.genStyle(photos_s, training=True)    # Shuffled photos -> fake shuffled styles
+            discFakeStyle = self.discStyle(fakeStyle)               # Discriminator of fake styles
+            discFakeStyle_s = self.discStyle(fakeStyle_s)           # Discriminator of fake shuffled styles
+            discStyle = self.discStyle(styles)                      # Discriminator of styles
+            discPhoto = self.discStyle(photos)                      # Discriminator of photos
+            discPhoto_s = self.discStyle(photos_s)                  # Discriminator of shuffled photos
 
             # Discriminator losses
-            lossD1 = self.euclDistProxLoss(discStyle)
-            lossD2 = self.euclDistDistLoss(discGenerated, self.margin)
-            lossD3 = 0 # self.cosSimPairLoss(discOrig, discGenerated)
+            lossD1 = self.euclProxLoss(discStyle)
+            lossD2 = self.euclDistLoss(discFakeStyle)
+            lossD3 = self.cosSimPairLoss(discPhoto, discPhoto_s, discFakeStyle, discFakeStyle_s)
             lossD = lossD1 + lossD2 + lossD3
 
             # Generator losses
-            lossG1 = self.euclDistProxLoss(discGenerated)
+            lossG1 = self.euclProxLoss(discFakeStyle)
             lossG = lossG1 + lossD3
-        DiscriminatorGradients = tape.gradient(lossD, self.disc.trainable_variables)    # Discriminator gradient
-        GeneratorGradients = tape.gradient(lossG, self.gen.trainable_variables)         # Generator gradient
+        DiscriminatorGradients = tape.gradient(lossD, self.discStyle.trainable_variables)    # Discriminator gradient
+        GeneratorGradients = tape.gradient(lossG, self.genStyle.trainable_variables)         # Generator gradient
 
         # Optimizer
-        self.optimizer.apply_gradients(zip(DiscriminatorGradients, self.disc.trainable_variables))
-        self.optimizer.apply_gradients(zip(GeneratorGradients, self.gen.trainable_variables))
+        self.discStyleOptim.apply_gradients(zip(DiscriminatorGradients, self.discStyle.trainable_variables))
+        self.genStyleOptim.apply_gradients(zip(GeneratorGradients, self.genStyle.trainable_variables))
 
-        return {"lossD": lossD, "lossD1": lossD1, "lossD2": lossD2, "lossD3": lossD3, "lossG": lossG, "lossG1": lossG1,
-                "discGensytleGeneratedL2": tf.norm(discGenerated)}
+        return {"lossD": lossD, "lossD1": lossD1, "lossD2": lossD2, "lossD3": lossD3, "lossG": lossG, "lossG1": lossG1}
 
 ### Losses that go along with cycle GAN model
 def flatten(x: Tensor) -> Tensor:
@@ -188,11 +207,11 @@ def discriminatorLoss() -> Callable[[Tensor, Tensor], Tensor]:
     fakeLoss = lambda x: \
                         tf.keras.losses.BinaryCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE) \
                         (tf.zeros_like(flatten(x)), flatten(x))
-    return lambda orig, fake: origLoss(orig) + fakeLoss(fake)
+    return lambda orig, fake: 0.5 * (origLoss(orig) + fakeLoss(fake))
 
-def identityLoss() -> Callable[[Tensor, Tensor], Tensor]:
+def identityLoss(lmbd: float) -> Callable[[Tensor, Tensor], Tensor]:
     return lambda x, y: \
-            tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE) \
+            lmbd * tf.keras.losses.MeanAbsoluteError(reduction=tf.keras.losses.Reduction.NONE) \
             (flatten(x), flatten(y))
 
 def adamOptimizer() -> tf.keras.optimizers.Adam:
@@ -201,7 +220,6 @@ def adamOptimizer() -> tf.keras.optimizers.Adam:
 ### Cycle GAN
 class CycleGAN(keras.Model):
     def __init__(self,
-                 shape: List[int],
                  genPhoto: keras.Model,
                  genStyle: keras.Model,
                  discPhoto: keras.Model,
@@ -213,8 +231,7 @@ class CycleGAN(keras.Model):
                  genPhotoOptim: tf.keras.optimizers.Adam,
                  genStyleOptim: tf.keras.optimizers.Adam,
                  discPhotoOptim: tf.keras.optimizers.Adam,
-                 discStyleOptim: tf.keras.optimizers.Adam,
-                 training: bool = False):
+                 discStyleOptim: tf.keras.optimizers.Adam):
         super(CycleGAN, self).__init__()
 
         # Model parts
@@ -236,45 +253,45 @@ class CycleGAN(keras.Model):
         self.discStyleOptim = discStyleOptim
 
     def train_step(self, data):
-        photo, style = data
+        photos, styles = data
 
         with tf.GradientTape(persistent=True) as tape:
 
             ## Cycle between photo and style domains
-            # Generating a stylish photo with style generator, and going back with photo generator
-            fakeStyle = self.genStyle(photo, training = True)           # Photo -> fake style
-            cyclePhoto = self.genPhoto(fakeStyle, training = True)     # Fake style -> photo
+            # Generating stylish photos with style generator, and going back with photo generator
+            fakeStyle = self.genStyle(photos, training=True)         # Photo -> fake styles
+            cyclePhoto = self.genPhoto(fakeStyle, training=True)     # Fake styles -> photos
 
             # Creating a photo from style, and going back to style domain
-            fakePhoto =  self.genPhoto(style, training = True)         # Style -> fake photo
-            cycleStyle = self.genStyle(fakePhoto, training = True)     # Fake photo -> style
+            fakePhoto =  self.genPhoto(styles, training=True)        # Style -> fake photo
+            cycleStyle = self.genStyle(fakePhoto, training=True)     # Fake photo -> style
 
             # Cycle consistency loss: mean absolute difference loss between photo/style and its cycled version ()
-            cycleLoss = self.cycleLoss(photo, cyclePhoto) + self.cycleLoss(style, cycleStyle)
+            cycleLoss = self.cycleLoss(photos, cyclePhoto) + self.cycleLoss(styles, cycleStyle)
 
             ## Discriminator fake style and photo
-            discFakeStyle = self.discStyle (fakeStyle, training = True)
-            genStyleLoss0 = self.genLoss(discFakeStyle)     # Penalizing for identifying fake style
-            discFakePhoto = self.discStyle (fakePhoto, training = True)
-            genPhotoLoss0 = self.genLoss(discFakePhoto)     # Penalizing for identifying fake photo
+            discFakeStyle = self.discStyle(fakeStyle)
+            genStyleLoss0 = self.genLoss(discFakeStyle)     # Penalizing for identifying a fake style
+            discFakePhoto = self.discPhoto(fakePhoto)
+            genPhotoLoss0 = self.genLoss(discFakePhoto)     # Penalizing for identifying a fake photo
 
-            # Creating style from style, and photo from photo
-            sameStyle = self.genStyle(style, training = True)          # Style -> fake style
-            samePhoto = self.genPhoto(photo, training = True)           # Photo -> fake photo
+            # Creating styles from styles, and photos from photos
+            sameStyle = self.genStyle(styles)          # Style -> fake style
+            samePhoto = self.genPhoto(photos)          # Photo -> fake photo
 
             # Penalizing generators for:
             # 1) Fake style/photo. Create fakes that can be identified by the discriminator;
             # 2) Being inconsistent. Style and photo generators should be the inverse of each other;
-            # 3) Change distribution of self. Style input to style generator should remain style - same for photo
-            genStyleLoss = genStyleLoss0 + cycleLoss + self.identLoss(style, sameStyle)
-            genPhotoLoss = genPhotoLoss0 + cycleLoss + self.identLoss(photo, samePhoto)
+            # 3) Change distribution of self. Style input to style generator should remain style - same for photos
+            genStyleLoss = genStyleLoss0 + cycleLoss + self.identLoss(styles, sameStyle)
+            genPhotoLoss = genPhotoLoss0 + cycleLoss + self.identLoss(photos, samePhoto)
 
             # Penalizing discriminators for:
             # 1) Fail to discriminate between real and fake style images
             # 2) Fail to discriminate between real and fake photo images
-            discStyle = self.discStyle(style, training = True)
+            discStyle = self.discStyle(styles)
             discStyleLoss = self.discLoss(discStyle, discFakeStyle)
-            discPhoto = self.discPhoto(photo, training = True)
+            discPhoto = self.discPhoto(photos)
             discPhotoLoss = self.discLoss(discPhoto, discFakePhoto)
 
         ## Gradients
@@ -289,7 +306,7 @@ class CycleGAN(keras.Model):
         self.discStyleOptim.apply_gradients(zip(discStyleGradients, self.discStyle.trainable_variables))
         self.discPhotoOptim.apply_gradients(zip(discPhotoGradients, self.discPhoto.trainable_variables))
 
-        return({"genStyleLoss": genStyleLoss, "genPhotoLoss": genPhotoLoss, "discStyleLoss": discStyleLoss,
+        return({"genStyleLoss": genStyleLoss, "discStyleLoss": discStyleLoss, "genPhotoLoss": genPhotoLoss,
                 "discPhotoLoss": discPhotoLoss})
 
 ### Tests

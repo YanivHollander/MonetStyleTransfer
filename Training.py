@@ -12,86 +12,108 @@ except:
     strategy = tf.distribute.get_strategy()
 print('Number of replicas:', strategy.num_replicas_in_sync)
 
-from ImageLoader import loadTFRecImages, loadJpgImages
+from ImageLoader import loadTFRecImages
 from GANModel import *
 
-BATCH_SIZE_PER_REPLICA = 30
+BATCH_SIZE_PER_REPLICA = 1
 GLOBAL_BATCH_SIZE = BATCH_SIZE_PER_REPLICA * strategy.num_replicas_in_sync
-EPOCHS = 10
+EPOCHS = 1
 BUFFER_SIZE = 2048
 IMAGE_SIZE = [256, 256]
-
-GAN_MODEL = 'cyclic'
 
 def loadData() -> (tf.data.Dataset, tf.data.Dataset):
 
     ### Load data and distribute
-    photos = loadTFRecImages("photo_tfrec").shuffle(BUFFER_SIZE).batch(GLOBAL_BATCH_SIZE)
-    style = loadTFRecImages("monet_tfrec").shuffle(BUFFER_SIZE).batch(GLOBAL_BATCH_SIZE)
-
-    # photos = loadJpgImages("photo_jpg").shuffle(BUFFER_SIZE).batch(GLOBAL_BATCH_SIZE)
-    # style = loadJpgImages("monet_jpg").shuffle(BUFFER_SIZE).batch(GLOBAL_BATCH_SIZE)
+    photos = loadTFRecImages("photo_tfrec")
+    style = loadTFRecImages("monet_tfrec")
 
     return photos, style
 
-def train(photos: tf.data.Dataset, style: tf.data.Dataset) -> keras.Model:
+class GAN:
+    def __init__(self, gan_model: str):
 
-    ### Strategy scope
-    with strategy.scope():
+        ### Strategy scope
+        with strategy.scope():
 
-        ### Siamese GAN
-        if GAN_MODEL == 'siamese':
+            if gan_model == 'small':
+                self.model = SmallGAN()
+                self.model.compile ()
 
-            ## Losses
-            euclDistProxLoss = euclideanDistanceImageProximalLoss
-            euclDistDistLoss = euclideanDistanceImageDistalLoss
-            cosSimPairLoss = cosineSimilarityImagePairLoss
+            ### Siamese GAN
+            elif gan_model == 'siamese':
 
-            # Model
-            optimizer = tf.keras.optimizers.Adam(2e-4, beta_1=0.5, epsilon=0.1)
-            model = SiameseGAN([*IMAGE_SIZE, 3], 0.2, euclDistProxLoss, euclDistDistLoss, cosSimPairLoss,
-                               training = True)
-            model.compile(optimizer)
+                ## Generator/discriminator
+                genStyleFn = Generator([*IMAGE_SIZE, 3], training = True)
+                discStyleFn = Discriminator([*IMAGE_SIZE, 3])
 
-        ### Cycle GAN
-        elif GAN_MODEL == 'cyclic':
+                ## Losses
+                euclProxLossFn = euclideanImageProximalLoss()
+                euclDistLossFn = euclideanImageDistalLoss(0.5)
+                cosSimPairLossFn = cosineSimilarityImagePairLoss()
 
-            ## Generator/discriminator
-            genPhotoFn = Generator([*IMAGE_SIZE, 3], True)
-            genStyleFn = Generator([*IMAGE_SIZE, 3], True)
-            discPhotoFn = Discriminator([*IMAGE_SIZE, 3], True)
-            discStyleFn = Discriminator([*IMAGE_SIZE, 3], True)
+                ## Optimizers
+                genStyleOptimFn = adamOptimizer()
+                discStyleOptimFn = adamOptimizer()
 
-            ## Losses
-            cycleLossFn = identityLoss()
-            genLossFn = generatorLoss()
-            discLossFn = discriminatorLoss()
-            identLossFn = identityLoss()
+                # Model
+                self.model = SiameseGAN(
+                    genStyleFn, discStyleFn,
+                    euclProxLossFn, euclDistLossFn, cosSimPairLossFn,
+                    genStyleOptimFn, discStyleOptimFn)
+                self.model.compile()
 
-            ## Optimizers
-            genPhotoOptimFn = adamOptimizer()
-            genStyleOptimFn = adamOptimizer()
-            discPhotoOptimFn = adamOptimizer()
-            discStyleOptimFn = adamOptimizer()
+            ### Cycle GAN
+            elif gan_model == 'cyclic':
 
-            ## Model
-            model = CycleGAN([*IMAGE_SIZE, 3],
-                genPhotoFn, genStyleFn, discPhotoFn, discStyleFn,
-                cycleLossFn, genLossFn, discLossFn, identLossFn,
-                genPhotoOptimFn, genStyleOptimFn, discPhotoOptimFn, discStyleOptimFn)
-            model.compile()
+                ## Generator/discriminator
+                genPhotoFn = Generator([*IMAGE_SIZE, 3], training = True)
+                genStyleFn = Generator([*IMAGE_SIZE, 3], training = True)
+                discPhotoFn = Discriminator([*IMAGE_SIZE, 3])
+                discStyleFn = Discriminator([*IMAGE_SIZE, 3])
 
-    ## Train
-    model.fit(tf.data.Dataset.zip((photos, style)), epochs=EPOCHS, verbose=1)
-    return model
+                ## Losses
+                cycleLossFn = identityLoss(5.)
+                genLossFn = generatorLoss()
+                discLossFn = discriminatorLoss()
+                identLossFn = identityLoss(10.)
 
-def generate(photos: tf.data.Dataset, model: keras.Model) -> tf.data.Dataset:
-    model.predict(photos)
+                ## Optimizers
+                genPhotoOptimFn = adamOptimizer()
+                genStyleOptimFn = adamOptimizer()
+                discPhotoOptimFn = adamOptimizer()
+                discStyleOptimFn = adamOptimizer()
+
+                ## Model
+                self.model = CycleGAN(
+                                 genPhotoFn, genStyleFn, discPhotoFn, discStyleFn,
+                                 cycleLossFn, genLossFn, discLossFn, identLossFn,
+                                 genPhotoOptimFn, genStyleOptimFn, discPhotoOptimFn, discStyleOptimFn)
+                self.model.compile()
+
+    def train(self, data: tf.data.Dataset, epochs=EPOCHS) -> None:
+        self.model.fit(data, epochs=epochs, verbose=1)
+
+def plotImages(photos: tf.data.Dataset, n: int):
+    import matplotlib.pyplot as plt
+    _, ax = plt.subplots(n, 1, figsize=(24, 24))
+    for i, img in enumerate(photos.take(n)):
+        img = (img[0] * 127.5 + 127.5).numpy().astype(np.uint8)
+        ax[i].imshow(img)
+        ax[i].axis("off")
+    plt.show()
 
 if __name__ == '__main__':
     photos, style = loadData()
-    train(photos, style)
-
+    photos = photos.batch(1)
+    photos_s = photos.shuffle(BUFFER_SIZE)
+    # plotImages(photos, 3)
+    # plotImages(photos_s, 3)
+    style = style.batch(1)
+    gan = GAN('siamese')
+    gan.train(tf.data.Dataset.zip((photos, photos_s, style)), epochs=1)
+    # gan.savePredictions(photos)
+    # from ImageLoader import plotImageList
+    # plotImageList(styles)
 
 
 

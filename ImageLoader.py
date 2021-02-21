@@ -6,7 +6,7 @@ from typing import List, Any
 import tensorflow as tf
 import numpy as np
 
-DATA_PATH = ""
+DATA_PATH = "/Users/hollander/OneDrive/Documents/Career/ProjectNextGen/Kaggle/MonetStyleTransfer/Data/"
 IMAGE_SIZE = [256, 256]
 BATCH_SIZE = 64
 
@@ -77,6 +77,14 @@ def plotImages(dataset: tf.data.Dataset, n: int = 1):
     for i in range(n):
         plt.subplot(1, n, i + 1)
         plt.imshow(image[i] * 0.5 + 0.5)
+        plt.axis('off')
+    plt.show()
+
+def plotImageList(images: List):
+    n = len(images)
+    for i, image in enumerate(images):
+        plt.subplot(1, n, i + 1)
+        plt.imshow(image * 0.5 + 0.5)
         plt.axis('off')
     plt.show()
 
